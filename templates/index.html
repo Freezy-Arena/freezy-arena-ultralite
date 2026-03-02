@@ -270,13 +270,14 @@
             </div>
 
             <!-- Preset buttons -->
-            <div class="d-flex flex-column gap-1">
+            <div id="customTimerControls" class="d-flex flex-column gap-1">
               <button type="button" class="btn btn-outline-secondary btn-sm timer-preset w-100" data-seconds="15">Autonomous</button>
               <button type="button" class="btn btn-outline-secondary btn-sm timer-preset w-100" data-seconds="105">Teleoperated</button>
               <button type="button" class="btn btn-outline-secondary btn-sm timer-preset w-100" data-seconds="30">Endgame</button>
               <button type="button" class="btn btn-outline-secondary btn-sm timer-preset w-100" data-seconds="150">Full Match</button>
             </div>
 
+            <div id="loadedMatchIndicator" class="small text-muted mt-1"></div>
             <!-- Event name -->
             <div id="fc-event-name" class="text-center mt-3 small text-muted"></div>
           </div>

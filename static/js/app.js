@@ -6,6 +6,7 @@ $(function () {
     window.currentLoadedMatchId = null;
     window._lastTimerEndSeq = null;
     window._prevRunningForDone = false;
+    window.currentLoadedMatchObj = null;
 
     // initial status
     checkWpaKeyStatus();
@@ -326,30 +327,54 @@ function renderTimer(seconds) {
 }
 
 function applyScheduleModeUI() {
-    const startBtn = document.getElementById('startTimer');
-    if (!startBtn) return;
+  const startBtn = document.getElementById('startTimer');
+  const stopBtn = document.getElementById('stopTimer');
+  const customControls = document.getElementById('customTimerControls');
 
-    if (window.scheduleEnabled) {
-        startBtn.textContent = 'Run Match';
+  if (!startBtn) return;
 
-        const total = window.matchTiming?.total;
-        if (typeof total === 'number' && total > 0) {
-            $('#timerInput').val(total);
-            localStorage.setItem('lastTimerSeconds', String(total));
-            renderTimer(total);
+  if (window.scheduleEnabled) {
+    // button labels
+    startBtn.textContent = 'Start Match';
+    if (stopBtn) stopBtn.textContent = 'Abort Match';
 
-            // Update preset buttons dynamically if they exist
-            document.querySelectorAll('.timer-preset').forEach(btn => {
-                const label = (btn.textContent || '').trim().toLowerCase();
-                if (label.includes('auton') || label.includes('auto')) btn.dataset.seconds = window.matchTiming.auto;
-                else if (label.includes('tele')) btn.dataset.seconds = window.matchTiming.teleop;
-                else if (label.includes('end')) btn.dataset.seconds = window.matchTiming.endgame;
-                else if (label.includes('full') || label.includes('match')) btn.dataset.seconds = window.matchTiming.total;
-            });
-        }
+    // hide ad-hoc controls (timer input + presets)
+    if (customControls) {
+      setElementHidden(customControls, true);
     } else {
-        startBtn.textContent = 'Start';
+      // fallback if you didn't add wrapper yet
+      const ti = document.getElementById('timerInput');
+      if (ti) setElementHidden(ti, true);
+      document.querySelectorAll('.timer-preset').forEach(b => setElementHidden(b, true));
     }
+
+    // lock timer input value to full match total (even though hidden)
+    const total = window.matchTiming?.total;
+    if (typeof total === 'number' && total > 0) {
+      $('#timerInput').val(total);
+      localStorage.setItem('lastTimerSeconds', String(total));
+      renderTimer(total);
+    }
+
+    updateLoadedMatchIndicator();
+  } else {
+    // non-schedule mode = free timers visible
+    startBtn.textContent = 'Start';
+    if (stopBtn) stopBtn.textContent = 'Stop';
+
+    if (customControls) {
+      setElementHidden(customControls, false);
+    } else {
+      const ti = document.getElementById('timerInput');
+      if (ti) setElementHidden(ti, false);
+      document.querySelectorAll('.timer-preset').forEach(b => setElementHidden(b, false));
+    }
+
+    // no loaded match indicator when not scheduled
+    window.currentLoadedMatchId = null;
+    window.currentLoadedMatchObj = null;
+    updateLoadedMatchIndicator();
+  }
 }
 
 function initUnifiedStream(retryDelayMs = 1500) {
@@ -641,73 +666,82 @@ async function fetchScheduleAndRender() {
 }
 
 function renderMatchList(matches) {
-    const matchList = document.getElementById('matchList');
-    if (!matchList) return;
+  const matchList = document.getElementById('matchList');
+  if (!matchList) return;
 
-    matchList.innerHTML = '';
+  matchList.innerHTML = '';
 
-    const timerRunning = !!window.timerRunning;
+  const timerRunning = !!window.timerRunning;
 
-    matches.forEach(m => {
-        const li = document.createElement('div');
-        li.className = 'list-group-item d-flex justify-content-between align-items-start gap-2';
+  matches.forEach(m => {
+    const li = document.createElement('div');
+    li.className = 'list-group-item d-flex justify-content-between align-items-start gap-2';
 
-        const timeStr = m.start_time
-            ? new Date(m.start_time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-            : '-';
+    // highlight currently loaded match
+    if (window.currentLoadedMatchId && String(window.currentLoadedMatchId) === String(m.match_id)) {
+      li.classList.add('loaded-match');
+      li.setAttribute('aria-current', 'true');
+    }
 
-        const red = m.red || [];
-        const blue = m.blue || [];
+    const timeStr = m.start_time
+      ? new Date(m.start_time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+      : '-';
 
-        const redLine = [
-            `<span class="text-danger fw-bold">RED - R1</span>: ${red[0] || ''}`,
-            `<span class="text-danger fw-bold">R2</span>: ${red[1] || ''}`,
-            `<span class="text-danger fw-bold">R3</span>: ${red[2] || ''}`
-        ].join(', ');
+    const red = m.red || [];
+    const blue = m.blue || [];
 
-        const blueLine = [
-            `<span class="text-primary fw-bold">BLUE - B1</span>: ${blue[0] || ''}`,
-            `<span class="text-primary fw-bold">B2</span>: ${blue[1] || ''}`,
-            `<span class="text-primary fw-bold">B3</span>: ${blue[2] || ''}`
-        ].join(', ');
+    const redLine = [
+      `<span class="text-danger fw-bold">RED - R1</span>: ${red[0] || ''}`,
+      `<span class="text-danger fw-bold">R2</span>: ${red[1] || ''}`,
+      `<span class="text-danger fw-bold">R3</span>: ${red[2] || ''}`
+    ].join(', ');
 
-        const info = document.createElement('div');
-        info.className = 'me-2 flex-grow-1';
-        info.innerHTML = `
+    const blueLine = [
+      `<span class="text-primary fw-bold">BLUE - B1</span>: ${blue[0] || ''}`,
+      `<span class="text-primary fw-bold">B2</span>: ${blue[1] || ''}`,
+      `<span class="text-primary fw-bold">B3</span>: ${blue[2] || ''}`
+    ].join(', ');
+
+    const info = document.createElement('div');
+    info.className = 'me-2 flex-grow-1';
+    info.innerHTML = `
       <div class="${m.done ? 'text-muted text-decoration-line-through' : ''}">
         Match ${m.match_id} — ${timeStr}
       </div>
-      <div class="small ${m.done ? 'text-muted' : ''}">
-        ${redLine}
-      </div>
-      <div class="small ${m.done ? 'text-muted' : ''}">
-        ${blueLine}
-      </div>
+      <div class="small ${m.done ? 'text-muted' : ''}">${redLine}</div>
+      <div class="small ${m.done ? 'text-muted' : ''}">${blueLine}</div>
     `;
 
-        const btn = document.createElement('button');
-        btn.className = 'btn btn-sm ' + (m.done ? 'btn-outline-secondary' : 'btn-outline-primary');
-        btn.textContent = 'Load';
+    const btn = document.createElement('button');
+    btn.className = 'btn btn-sm ' + (m.done ? 'btn-outline-secondary' : 'btn-outline-primary');
+    btn.textContent = 'Load';
 
-        if (timerRunning) {
-            btn.disabled = true;
-            btn.title = 'Cannot load match while timer is running';
-        }
+    if (timerRunning) {
+      btn.disabled = true;
+      btn.title = 'Cannot load match while timer is running';
+    }
 
-        btn.addEventListener('click', async () => {
-            if (window.timerRunning) {
-                alert('Timer is running. Stop the timer before loading a new match.');
-                return;
-            }
+    btn.addEventListener('click', async () => {
+      if (window.timerRunning) {
+        alert('Timer is running. Stop/Abort the match before loading a new match.');
+        return;
+      }
 
-            await loadMatchIntoStations(m);
-            window.currentLoadedMatchId = m.match_id;
-        });
+      await loadMatchIntoStations(m);
 
-        li.appendChild(info);
-        li.appendChild(btn);
-        matchList.appendChild(li);
+      window.currentLoadedMatchId = m.match_id;
+      window.currentLoadedMatchObj = m;
+
+      updateLoadedMatchIndicator();
+
+      // re-render so highlight updates
+      renderMatchList(matches);
     });
+
+    li.appendChild(info);
+    li.appendChild(btn);
+    matchList.appendChild(li);
+  });
 }
 
 async function loadMatchIntoStations(matchObj) {
@@ -825,12 +859,44 @@ function updateFieldReadyBanner(ready) {
 }
 
 async function completeLoadedScheduledMatchIfAny() {
-    if (!window.scheduleEnabled) return;
-    if (!window.currentLoadedMatchId) return;
+  if (!window.scheduleEnabled) return;
+  if (!window.currentLoadedMatchId) return;
 
-    try {
-        await markMatchDone(window.currentLoadedMatchId, true);
-    } finally {
-        window.currentLoadedMatchId = null;
-    }
+  const mid = window.currentLoadedMatchId;
+  window.currentLoadedMatchId = null;
+  window.currentLoadedMatchObj = null;
+  updateLoadedMatchIndicator();
+
+  await markMatchDone(mid, true);
+}
+
+function setElementHidden(el, hidden) {
+  if (!el) return;
+  if (hidden) el.classList.add('d-none');
+  else el.classList.remove('d-none');
+}
+
+function updateLoadedMatchIndicator() {
+  const el = document.getElementById('loadedMatchIndicator');
+  if (!el) return;
+
+  if (!window.scheduleEnabled) {
+    el.textContent = '';
+    return;
+  }
+
+  const m = window.currentLoadedMatchObj;
+  if (!m || !window.currentLoadedMatchId) {
+    el.textContent = 'No match loaded.';
+    return;
+  }
+
+  const timeStr = m.start_time
+    ? new Date(m.start_time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+    : '-';
+
+  const red = (m.red || []).filter(Boolean).join(', ');
+  const blue = (m.blue || []).filter(Boolean).join(', ');
+
+  el.innerHTML = `<span class="fw-semibold">Loaded:</span> Match ${m.match_id}`;
 }

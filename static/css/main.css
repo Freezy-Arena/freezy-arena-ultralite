@@ -278,3 +278,21 @@ padding: 0.35rem 0.5rem;
   100% { opacity: 1; }
 }
 
+/* Highlight the currently loaded match without conflicting with red/blue alliance colors */
+.list-group-item.loaded-match {
+  background-color: var(--bs-tertiary-bg);           /* neutral */
+  border-left: 6px solid var(--bs-secondary);       /* neutral accent */
+  box-shadow: inset 0 0 0 1px rgba(0,0,0,0.06);
+}
+
+/* Keep text readable and avoid Bootstrap active overrides */
+.list-group-item.loaded-match,
+.list-group-item.loaded-match * {
+  color: inherit;
+}
+
+.list-group-item.loaded-match .text-danger,
+.list-group-item.loaded-match .text-primary {
+  /* preserve bootstrap red/blue */
+  color: inherit; /* <-- remove this line if it overrides your alliance colors */
+}
