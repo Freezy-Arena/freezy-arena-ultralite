@@ -9,7 +9,7 @@
 </head>
 <body>
   <!-- Mute indicator -->
-<div id="mute-indicator" class="mute-icon" title="Click or press any key to enable sound">🔇</div>
+<!--<div id="mute-indicator" class="mute-icon" title="Click or press any key to enable sound">🔇</div>-->
   <div id="alert">Timer Ended!</div>
 <div id="bottom-container">
   <div id="teams" class="teams-container">
@@ -22,7 +22,8 @@
   </div>
   </div>
   <audio id="buzzer" src="/static/audio/end.wav" preload="auto"></audio>
-  <!--<audio id="start-sound" src="/static/start.wav" preload="auto"></audio>-->
+  <audio id="buzzer" src="/static/audio/resume.wav" preload="auto"></audio>
+  <audio id="buzzer" src="/static/audio/warning.wav" preload="auto"></audio>
   <audio id="unlocker" preload="auto"></audio>
   <script src="/static/js/audience.js"></script>
 </body>

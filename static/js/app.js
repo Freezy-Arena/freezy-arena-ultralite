@@ -1,5 +1,12 @@
 // static/js/app.js
 $(function () {
+
+    window.scheduleEnabled = false;
+    window.matchTiming = null;
+    window.currentLoadedMatchId = null;
+    window._lastTimerEndSeq = null;
+    window._prevRunningForDone = false;
+
     // initial status
     checkWpaKeyStatus();
     refreshLogDisplay();
@@ -110,68 +117,67 @@ $(function () {
         });
     }
 
-// =========================
-// PUSH CONFIG (main page)
-// =========================
-const $configForm = $('#configForm');
-if ($configForm.length) {
-  $configForm.on('submit', function (e) {
-    e.preventDefault();
+    // =========================
+    // PUSH CONFIG (main page)
+    // =========================
+    const $configForm = $('#configForm');
+    if ($configForm.length) {
+        $configForm.on('submit', function (e) {
+            e.preventDefault();
 
-    //Block if timer running
-    if (window.timerRunning) {
-      alert('Timer is running. Stop the timer before pushing configuration.');
-      return;
+            //Block if timer running
+            if (window.timerRunning) {
+                alert('Timer is running. Stop the timer before pushing configuration.');
+                return;
+            }
+
+            let payload = {};
+            $(this).serializeArray().forEach(i => payload[i.name] = i.value);
+
+            $.ajax({
+                url: '/push_config',
+                type: 'POST',
+                contentType: 'application/json',
+                data: JSON.stringify(payload),
+                success: async () => {
+                    await refreshLogDisplay();
+                },
+                error: async () => {
+                    await refreshLogDisplay();
+                }
+            });
+        });
     }
 
-    let payload = {};
-    $(this).serializeArray().forEach(i => payload[i.name] = i.value);
+    // =========================
+    // UPDATE DISPLAY ONLY (main page)
+    // =========================
+    const $updateDisplay = $('#updateDisplay');
+    if ($updateDisplay.length) {
+        $updateDisplay.on('click', function () {
+            //Block if timer running
+            if (window.timerRunning) {
+                alert('Timer is running. Stop the timer before updating display.');
+                return;
+            }
 
-    $.ajax({
-      url: '/push_config',
-      type: 'POST',
-      contentType: 'application/json',
-      data: JSON.stringify(payload),
-      success: async () => {
-        await refreshLogDisplay();
-      },
-      error: async () => {
-        await refreshLogDisplay();
-      }
-    });
-  });
-}
+            let payload = {};
+            $('#configForm').serializeArray().forEach(i => payload[i.name] = i.value);
 
-// =========================
-// UPDATE DISPLAY ONLY (main page)
-// =========================
-const $updateDisplay = $('#updateDisplay');
-if ($updateDisplay.length) {
-  $updateDisplay.on('click', function () {
-    //Block if timer running
-    if (window.timerRunning) {
-      alert('Timer is running. Stop the timer before updating display.');
-      return;
+            $.ajax({
+                url: '/update_display',
+                type: 'POST',
+                contentType: 'application/json',
+                data: JSON.stringify(payload),
+                success: async () => {
+                    await refreshLogDisplay();
+                },
+                error: async () => {
+                    await refreshLogDisplay();
+                }
+            });
+        });
     }
-
-    let payload = {};
-    $('#configForm').serializeArray().forEach(i => payload[i.name] = i.value);
-
-    $.ajax({
-      url: '/update_display',
-      type: 'POST',
-      contentType: 'application/json',
-      data: JSON.stringify(payload),
-      success: async () => {
-        await refreshLogDisplay();
-      },
-      error: async () => {
-        await refreshLogDisplay();
-      }
-    });
-  });
-}
-
 
     // =========================
     // CLEAR SWITCH (main page)
@@ -193,25 +199,36 @@ if ($updateDisplay.length) {
     // =========================
     const $startTimer = $('#startTimer');
     if ($startTimer.length) {
-        $startTimer.on('click', async () => {
-            const seconds = $('#timerInput').val();
-            if (!seconds || isNaN(seconds)) {
-                // Optional: Add client-side validation to prevent invalid starts
-                alert('Please enter a valid number of seconds.');
-                return;
-            }
+      $startTimer.on('click', async () => {
+        let seconds;
 
-            // Save to localStorage before starting
-            localStorage.setItem('lastTimerSeconds', seconds);
+        // If schedule is active and timing is available, "Run Match" always runs full match length.
+        if (window.scheduleEnabled && window.matchTiming && typeof window.matchTiming.total === 'number' && window.matchTiming.total > 0) {
+          seconds = window.matchTiming.total;
+          $('#timerInput').val(seconds);
+        } else {
+          seconds = parseInt($('#timerInput').val(), 10);
+        }
 
-            try {
-                await $.post('/start_timer', { seconds });
-            } catch (e) {
-                // server logs
-            }
-            // SSE will update, but we can also force a refresh
-            await refreshLogDisplay();
-        });
+        if (!seconds || isNaN(seconds) || seconds <= 0) {
+          alert('Please enter a valid number of seconds.');
+          return;
+        }
+
+        // Save to localStorage before starting
+        localStorage.setItem('lastTimerSeconds', String(seconds));
+
+        // IMPORTANT: tell phase-sound logic what this run's total is
+        window.currentTimerTotalSeconds = seconds;
+
+        try {
+          await $.post('/start_timer', { seconds });
+        } catch (e) {
+          // server logs
+        }
+
+        await refreshLogDisplay();
+      });
     }
 
     // =========================
@@ -219,16 +236,24 @@ if ($updateDisplay.length) {
     // =========================
     const $stopTimer = $('#stopTimer');
     if ($stopTimer.length) {
-        $stopTimer.on('click', async () => {
-            try {
-                await $.post('/stop_timer');
-            } catch (e) {
-                // server logs
-            }
-            await refreshLogDisplay();
-            // if SSE is down, force timer update
-            updateTimer();
-        });
+      // Prevent accidental form submit if this button is inside a <form>
+      $stopTimer.attr('type', 'button');
+
+      $stopTimer.on('click', async (e) => {
+        try {
+          // stop the server timer
+          await $.post('/stop_timer');
+        } catch (err) {
+          // server logs will show the reason; keep UI responsive anyway
+          console.warn('Stop timer request failed:', err);
+        }
+
+        // Force local UI state immediately (works even if SSE is down)
+        window.timerRunning = false;
+        try { renderTimer(0); } catch (_) {}
+
+        await refreshLogDisplay();
+      });
     }
 });
 
@@ -300,6 +325,33 @@ function renderTimer(seconds) {
     }
 }
 
+function applyScheduleModeUI() {
+    const startBtn = document.getElementById('startTimer');
+    if (!startBtn) return;
+
+    if (window.scheduleEnabled) {
+        startBtn.textContent = 'Run Match';
+
+        const total = window.matchTiming?.total;
+        if (typeof total === 'number' && total > 0) {
+            $('#timerInput').val(total);
+            localStorage.setItem('lastTimerSeconds', String(total));
+            renderTimer(total);
+
+            // Update preset buttons dynamically if they exist
+            document.querySelectorAll('.timer-preset').forEach(btn => {
+                const label = (btn.textContent || '').trim().toLowerCase();
+                if (label.includes('auton') || label.includes('auto')) btn.dataset.seconds = window.matchTiming.auto;
+                else if (label.includes('tele')) btn.dataset.seconds = window.matchTiming.teleop;
+                else if (label.includes('end')) btn.dataset.seconds = window.matchTiming.endgame;
+                else if (label.includes('full') || label.includes('match')) btn.dataset.seconds = window.matchTiming.total;
+            });
+        }
+    } else {
+        startBtn.textContent = 'Start';
+    }
+}
+
 function initUnifiedStream(retryDelayMs = 1500) {
     if (!window.EventSource) {
         console.warn('SSE not supported in this browser.');
@@ -308,18 +360,38 @@ function initUnifiedStream(retryDelayMs = 1500) {
 
     const es = new EventSource('/stream');
 
-    es.addEventListener('timer', (event) => {
-    try {
+    es.addEventListener('timer', async (event) => {
+      try {
         const data = JSON.parse(event.data);
         const remaining = Math.floor(data.remaining || 0);
+        const running = !!data.running;
+
         renderTimer(remaining);
+        window.timerRunning = running;
 
-        window.timerRunning = !!data.running;
-    } catch (e) {
+        // Mark scheduled match done ONLY on natural completion
+        // and only if a match is currently loaded.
+        if (typeof data.end_seq !== 'undefined') {
+          if (window._lastTimerEndSeq === null || typeof window._lastTimerEndSeq === 'undefined') {
+            window._lastTimerEndSeq = data.end_seq;
+          } else if (data.end_seq !== window._lastTimerEndSeq) {
+            window._lastTimerEndSeq = data.end_seq;
+
+            if (data.end_reason === 'completed') {
+              await completeLoadedScheduledMatchIfAny();
+            }
+          }
+        } else {
+          // fallback if server hasn't been patched yet
+          if (window._prevRunningForDone === true && running === false && remaining === 0) {
+            await completeLoadedScheduledMatchIfAny();
+          }
+          window._prevRunningForDone = running;
+        }
+      } catch (e) {
         console.error('Bad timer SSE data', e);
-    }
+      }
     });
-
 
     es.addEventListener('logs', (event) => {
         try {
@@ -337,19 +409,18 @@ function initUnifiedStream(retryDelayMs = 1500) {
     });
 
     es.addEventListener('apstatus', (event) => {
-    try {
-        const data = JSON.parse(event.data);
-        window.currentApData = data;
-        sseUpdateStationBadges(data);
+        try {
+            const data = JSON.parse(event.data);
+            window.currentApData = data;
+            sseUpdateStationBadges(data);
 
-        const ready = isAllStationsLinked(data);
-        updateFieldReadyBanner(ready);
+            const ready = isAllStationsLinked(data);
+            updateFieldReadyBanner(ready);
 
-    } catch (e) {
-        console.error('Bad apstatus SSE data', e);
-    }
+        } catch (e) {
+            console.error('Bad apstatus SSE data', e);
+        }
     });
-
 
     es.onerror = () => {
         console.warn('SSE connection lost, retrying...');
@@ -508,89 +579,101 @@ function refreshApStatusBadges() {
 }
 
 (function () {
-  const params = new URLSearchParams(window.location.search);
-  const reversed = params.get('reversed') === 'true';
-  if (!reversed) return;
+    const params = new URLSearchParams(window.location.search);
+    const reversed = params.get('reversed') === 'true';
+    if (!reversed) return;
 
-  document.querySelectorAll('.station-row').forEach(row => {
-    const containers = Array.from(row.querySelectorAll('.station-container'));
-    if (containers.length === 2) {
-      row.innerHTML = '';
-      row.appendChild(containers[1]);
-      row.appendChild(containers[0]);
-    }
-  });
+    document.querySelectorAll('.station-row').forEach(row => {
+        const containers = Array.from(row.querySelectorAll('.station-container'));
+        if (containers.length === 2) {
+            row.innerHTML = '';
+            row.appendChild(containers[1]);
+            row.appendChild(containers[0]);
+        }
+    });
 })();
 
 // Preset buttons functionality
 document.querySelectorAll('.timer-preset').forEach(btn => {
-  btn.addEventListener('click', () => {
-    const seconds = parseInt(btn.dataset.seconds, 10);
-    const input = document.getElementById('timerInput');
-    const timerDisplay = document.getElementById('timer');
+    btn.addEventListener('click', () => {
+        const seconds = parseInt(btn.dataset.seconds, 10);
+        const input = document.getElementById('timerInput');
+        const timerDisplay = document.getElementById('timer');
 
-    if (input && timerDisplay && !isNaN(seconds)) {
-      input.value = seconds;
-      // Save preset selection to localStorage
-      localStorage.setItem('lastTimerSeconds', seconds);
-      const minutes = Math.floor(seconds / 60);
-      const secs = seconds % 60;
-      timerDisplay.textContent = `${minutes.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
-    }
-  });
+        if (input && timerDisplay && !isNaN(seconds)) {
+            input.value = seconds;
+            // Save preset selection to localStorage
+            localStorage.setItem('lastTimerSeconds', seconds);
+            const minutes = Math.floor(seconds / 60);
+            const secs = seconds % 60;
+            timerDisplay.textContent = `${minutes.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+        }
+    });
 });
 
 // ============================
 // MATCH LIST (left sidebar)
 // ============================
 async function fetchScheduleAndRender() {
-  try {
-    const res = await fetch('/schedule/data', { cache: 'no-store' });
-    const data = await res.json();
-    renderMatchList(data.matches || []);
-  } catch (err) {
-    console.error('Failed to load schedule:', err);
-    const matchList = document.getElementById('matchList');
-    if (matchList) {
-      matchList.innerHTML = '<div class="text-muted small p-2">No schedule found.</div>';
+    try {
+        const res = await fetch('/schedule/data', { cache: 'no-store' });
+        const data = await res.json();
+
+        // schedule enabled + timing support
+        window.scheduleEnabled = Array.isArray(data.matches) && data.matches.length > 0;
+        window.matchTiming = data.timing || null;
+        applyScheduleModeUI();
+
+        renderMatchList(data.matches || []);
+    } catch (err) {
+        console.error('Failed to load schedule:', err);
+
+        // reset schedule mode if schedule fetch fails
+        window.scheduleEnabled = false;
+        window.matchTiming = null;
+        applyScheduleModeUI();
+
+        const matchList = document.getElementById('matchList');
+        if (matchList) {
+            matchList.innerHTML = '<div class="text-muted small p-2">No schedule found.</div>';
+        }
     }
-  }
 }
 
 function renderMatchList(matches) {
-  const matchList = document.getElementById('matchList');
-  if (!matchList) return;
+    const matchList = document.getElementById('matchList');
+    if (!matchList) return;
 
-  matchList.innerHTML = '';
+    matchList.innerHTML = '';
 
-  const timerRunning = !!window.timerRunning;
+    const timerRunning = !!window.timerRunning;
 
-  matches.forEach(m => {
-    const li = document.createElement('div');
-    li.className = 'list-group-item d-flex justify-content-between align-items-start gap-2';
+    matches.forEach(m => {
+        const li = document.createElement('div');
+        li.className = 'list-group-item d-flex justify-content-between align-items-start gap-2';
 
-    const timeStr = m.start_time
-      ? new Date(m.start_time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-      : '-';
+        const timeStr = m.start_time
+            ? new Date(m.start_time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+            : '-';
 
-    const red = m.red || [];
-    const blue = m.blue || [];
+        const red = m.red || [];
+        const blue = m.blue || [];
 
-    const redLine = [
-      `<span class="text-danger fw-bold">RED - R1</span>: ${red[0] || ''}`,
-      `<span class="text-danger fw-bold">R2</span>: ${red[1] || ''}`,
-      `<span class="text-danger fw-bold">R3</span>: ${red[2] || ''}`
-    ].join(', ');
+        const redLine = [
+            `<span class="text-danger fw-bold">RED - R1</span>: ${red[0] || ''}`,
+            `<span class="text-danger fw-bold">R2</span>: ${red[1] || ''}`,
+            `<span class="text-danger fw-bold">R3</span>: ${red[2] || ''}`
+        ].join(', ');
 
-    const blueLine = [
-      `<span class="text-primary fw-bold">BLUE - B1</span>: ${blue[0] || ''}`,
-      `<span class="text-primary fw-bold">B2</span>: ${blue[1] || ''}`,
-      `<span class="text-primary fw-bold">B3</span>: ${blue[2] || ''}`
-    ].join(', ');
+        const blueLine = [
+            `<span class="text-primary fw-bold">BLUE - B1</span>: ${blue[0] || ''}`,
+            `<span class="text-primary fw-bold">B2</span>: ${blue[1] || ''}`,
+            `<span class="text-primary fw-bold">B3</span>: ${blue[2] || ''}`
+        ].join(', ');
 
-    const info = document.createElement('div');
-    info.className = 'me-2 flex-grow-1';
-    info.innerHTML = `
+        const info = document.createElement('div');
+        info.className = 'me-2 flex-grow-1';
+        info.innerHTML = `
       <div class="${m.done ? 'text-muted text-decoration-line-through' : ''}">
         Match ${m.match_id} — ${timeStr}
       </div>
@@ -602,70 +685,78 @@ function renderMatchList(matches) {
       </div>
     `;
 
-    const btn = document.createElement('button');
-    btn.className = 'btn btn-sm ' + (m.done ? 'btn-outline-secondary' : 'btn-outline-primary');
-    btn.textContent = 'Load';
+        const btn = document.createElement('button');
+        btn.className = 'btn btn-sm ' + (m.done ? 'btn-outline-secondary' : 'btn-outline-primary');
+        btn.textContent = 'Load';
 
-    if (timerRunning) {
-      btn.disabled = true;
-      btn.title = 'Cannot load match while timer is running';
-    }
+        if (timerRunning) {
+            btn.disabled = true;
+            btn.title = 'Cannot load match while timer is running';
+        }
 
-    btn.addEventListener('click', () => {
-      if (window.timerRunning) {
-        alert('Timer is running. Stop the timer before loading a new match.');
-        return;
-      }
-      loadMatchIntoStations(m);
-      markMatchDone(m.match_id, true);
+        btn.addEventListener('click', async () => {
+            if (window.timerRunning) {
+                alert('Timer is running. Stop the timer before loading a new match.');
+                return;
+            }
+
+            await loadMatchIntoStations(m);
+            window.currentLoadedMatchId = m.match_id;
+        });
+
+        li.appendChild(info);
+        li.appendChild(btn);
+        matchList.appendChild(li);
     });
-
-    li.appendChild(info);
-    li.appendChild(btn);
-    matchList.appendChild(li);
-  });
 }
-
-
 
 async function loadMatchIntoStations(matchObj) {
-  const red = matchObj.red || [];
-  const blue = matchObj.blue || [];
+    const red = matchObj.red || [];
+    const blue = matchObj.blue || [];
 
-  // fill inputs
-  document.getElementById('red1').value = red[0] || '';
-  document.getElementById('red2').value = red[1] || '';
-  document.getElementById('red3').value = red[2] || '';
-  document.getElementById('blue1').value = blue[0] || '';
-  document.getElementById('blue2').value = blue[1] || '';
-  document.getElementById('blue3').value = blue[2] || '';
+    // fill inputs
+    document.getElementById('red1').value = red[0] || '';
+    document.getElementById('red2').value = red[1] || '';
+    document.getElementById('red3').value = red[2] || '';
+    document.getElementById('blue1').value = blue[0] || '';
+    document.getElementById('blue2').value = blue[1] || '';
+    document.getElementById('blue3').value = blue[2] || '';
 
-  // push config automatically
-  try {
-    const payload = {};
-    $('#configForm').serializeArray().forEach(i => payload[i.name] = i.value);
-    await $.ajax({
-      url: '/push_config',
-      type: 'POST',
-      contentType: 'application/json',
-      data: JSON.stringify(payload)
-    });
-    console.log(`Match ${matchObj.match_id} loaded and pushed.`);
-  } catch (err) {
-    console.error('Failed to push config:', err);
-  }
+    // push config automatically
+    try {
+        const payload = {};
+        $('#configForm').serializeArray().forEach(i => payload[i.name] = i.value);
+        await $.ajax({
+            url: '/push_config',
+            type: 'POST',
+            contentType: 'application/json',
+            data: JSON.stringify(payload)
+        });
+        console.log(`Match ${matchObj.match_id} loaded and pushed.`);
+    } catch (err) {
+        console.error('Failed to push config:', err);
+    }
 }
-
 
 async function markMatchDone(matchId, done) {
   try {
-    await fetch('/schedule/mark_done', {
+    // normalize to int when possible
+    let mid = matchId;
+    if (typeof mid === 'string' && /^\d+$/.test(mid)) mid = parseInt(mid, 10);
+
+    const res = await fetch('/schedule/mark_done', {
       method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ match_id: matchId, done })
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ match_id: mid, done })
     });
-    // re-render so it goes gray/strikethrough
-    fetchScheduleAndRender();
+
+    if (!res.ok) {
+      const txt = await res.text().catch(() => '');
+      console.error('mark_done failed:', res.status, txt);
+      return;
+    }
+
+    await fetchScheduleAndRender();
   } catch (err) {
     console.error('Failed to mark match done:', err);
   }
@@ -673,12 +764,12 @@ async function markMatchDone(matchId, done) {
 
 // hook refresh button
 document.addEventListener('DOMContentLoaded', () => {
-  const refBtn = document.getElementById('refreshSchedule');
-  if (refBtn) {
-    refBtn.addEventListener('click', fetchScheduleAndRender);
-  }
-  // initial load
-  fetchScheduleAndRender();
+    const refBtn = document.getElementById('refreshSchedule');
+    if (refBtn) {
+        refBtn.addEventListener('click', fetchScheduleAndRender);
+    }
+    // initial load
+    fetchScheduleAndRender();
 });
 
 async function prefillTeamListFromServer() {
@@ -698,39 +789,48 @@ async function prefillTeamListFromServer() {
 }
 
 function isAllStationsLinked(apData) {
-  if (!apData || !apData.stationStatuses) return false;
+    if (!apData || !apData.stationStatuses) return false;
 
-  const statuses = apData.stationStatuses;
-  const WALL_STATIONS = ['red1', 'red2', 'red3', 'blue1', 'blue2', 'blue3'];
+    const statuses = apData.stationStatuses;
+    const WALL_STATIONS = ['red1', 'red2', 'red3', 'blue1', 'blue2', 'blue3'];
 
-  // Filter out stations that are blank or not configured
-  const configuredStations = WALL_STATIONS.filter(k => {
-    const s = statuses[k];
-    return s && s.ssid && s.ssid.trim() !== '';  // only count configured ones
-  });
+    // Filter out stations that are blank or not configured
+    const configuredStations = WALL_STATIONS.filter(k => {
+        const s = statuses[k];
+        return s && s.ssid && s.ssid.trim() !== '';  // only count configured ones
+    });
 
-  if (configuredStations.length === 0) return false; // nothing configured, not ready
+    if (configuredStations.length === 0) return false; // nothing configured, not ready
 
-  // If all configured stations are linked, we’re good
-  return configuredStations.every(k => {
-    const s = statuses[k];
-    return s.isLinked === true;
-  });
+    // If all configured stations are linked, we’re good
+    return configuredStations.every(k => {
+        const s = statuses[k];
+        return s.isLinked === true;
+    });
 }
-
 
 function updateFieldReadyBanner(ready) {
-  const el = document.getElementById('field-ready');
-  if (!el) return;
+    const el = document.getElementById('field-ready');
+    if (!el) return;
 
-  el.classList.remove('field-ready', 'field-not-ready');
+    el.classList.remove('field-ready', 'field-not-ready');
 
-  if (ready) {
-    el.textContent = 'FIELD READY';
-    el.classList.add('field-ready');
-  } else {
-    el.textContent = 'FIELD NOT READY';
-    el.classList.add('field-not-ready');
-  }
+    if (ready) {
+        el.textContent = 'FIELD READY';
+        el.classList.add('field-ready');
+    } else {
+        el.textContent = 'FIELD NOT READY';
+        el.classList.add('field-not-ready');
+    }
 }
 
+async function completeLoadedScheduledMatchIfAny() {
+    if (!window.scheduleEnabled) return;
+    if (!window.currentLoadedMatchId) return;
+
+    try {
+        await markMatchDone(window.currentLoadedMatchId, true);
+    } finally {
+        window.currentLoadedMatchId = null;
+    }
+}

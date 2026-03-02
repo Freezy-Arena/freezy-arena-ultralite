@@ -51,45 +51,105 @@
           <div class="col-lg-8 col-md-12">
             <div class="card h-100 shadow-sm">
               <div class="card-header fw-semibold">Connection & Configuration Settings</div>
-              <div class="card-body">
-                <div class="row g-3">
-                  <div class="col-md-4">
-                    <label for="ap_ip" class="form-label">AP IP Address</label>
-                    <input type="text" class="form-control" id="ap_ip" name="ap_ip" value="{{ cfg.ap_ip }}">
-                    <div class="mt-2">
-                      <a id="ap_link" href="#" target="_blank" class="btn btn-outline-primary btn-sm" style="display: none;">Open AP Dashboard</a>
+
+              <!-- Make card-body a flex column so the button can sit at the bottom -->
+              <div class="card-body d-flex flex-column">
+                <!-- Everything above the button lives here -->
+                <div class="flex-grow-1">
+                  <div class="row g-3">
+                    <div class="col-md-4">
+                      <label for="ap_ip" class="form-label">AP IP Address</label>
+                      <input type="text" class="form-control" id="ap_ip" name="ap_ip" value="{{ cfg.ap_ip }}">
+                      <div class="mt-2">
+                        <a id="ap_link" href="#" target="_blank" class="btn btn-outline-primary btn-sm" style="display: none;">Open AP Dashboard</a>
+                      </div>
+                    </div>
+                    <div class="col-md-4">
+                      <label for="switch_ip" class="form-label">Switch IP Address</label>
+                      <input type="text" class="form-control" id="switch_ip" name="switch_ip" value="{{ cfg.switch_ip }}">
+                    </div>
+                    <div class="col-md-4">
+                      <label for="switch_password" class="form-label">Switch Password</label>
+                      <input type="text" class="form-control" id="switch_password" name="switch_password" value="{{ cfg.switch_password }}">
                     </div>
                   </div>
-                  <div class="col-md-4">
-                    <label for="switch_ip" class="form-label">Switch IP Address</label>
-                    <input type="text" class="form-control" id="switch_ip" name="switch_ip" value="{{ cfg.switch_ip }}">
+
+                  <hr class="my-4">
+
+                  <div class="row">
+                    <div class="col-md-6">
+                      <div class="form-check mb-2">
+                        <input class="form-check-input" type="checkbox" id="enable_ap" name="enable_ap" {% if cfg.enable_ap %}checked{% endif %}>
+                        <label class="form-check-label" for="enable_ap">Enable AP Configuration</label>
+                      </div>
+                      <p class="text-muted small mb-0">AP configuration can be enabled without switch configuration.</p>
+                    </div>
+                    <div class="col-md-6">
+                      <div class="form-check mb-2">
+                        <input class="form-check-input" type="checkbox" id="enable_switch" name="enable_switch" {% if cfg.enable_switch %}checked{% endif %}>
+                        <label class="form-check-label" for="enable_switch">Enable Switch Configuration</label>
+                      </div>
+                      <p class="text-muted small mb-0">Switch setup is optional but depends on AP enablement.</p>
+                    </div>
                   </div>
-                  <div class="col-md-4">
-                    <label for="switch_password" class="form-label">Switch Password</label>
-                    <input type="text" class="form-control" id="switch_password" name="switch_password" value="{{ cfg.switch_password }}">
+
+                  <!-- ========================= -->
+                  <!-- MATCH TIMING (seconds)    -->
+                  <!-- ========================= -->
+                  <hr class="my-4">
+                  <h6 class="fw-semibold mb-3">Match Timing (seconds)</h6>
+
+                  <div class="row g-3">
+                    <div class="col-md-4">
+                      <label for="match_auto_seconds" class="form-label">Autonomous</label>
+                      <input
+                        type="number"
+                        min="0"
+                        class="form-control"
+                        id="match_auto_seconds"
+                        name="match_auto_seconds"
+                        value="{{ cfg.get('match_auto_seconds', 15) }}">
+                      <div class="form-text small">Typical FRC: 15</div>
+                    </div>
+
+                    <div class="col-md-4">
+                      <label for="match_teleop_seconds" class="form-label">Teleop (excluding endgame)</label>
+                      <input
+                        type="number"
+                        min="0"
+                        class="form-control"
+                        id="match_teleop_seconds"
+                        name="match_teleop_seconds"
+                        value="{{ cfg.get('match_teleop_seconds', 105) }}">
+                      <div class="form-text small">Typical FRC: 105 (teleop total 135 minus endgame 30)</div>
+                    </div>
+
+                    <div class="col-md-4">
+                      <label for="match_endgame_seconds" class="form-label">Endgame</label>
+                      <input
+                        type="number"
+                        min="0"
+                        class="form-control"
+                        id="match_endgame_seconds"
+                        name="match_endgame_seconds"
+                        value="{{ cfg.get('match_endgame_seconds', 30) }}">
+                      <div class="form-text small">Typical FRC: 30</div>
+                    </div>
                   </div>
+
+                  <div class="mt-2">
+                    <div class="text-muted small">
+                      Total match time is computed automatically (auto + teleop + endgame). When Match Scheduling is enabled, the main page button changes to <b>Run Match</b> and runs the total.
+                    </div>
+                  </div>
+                  <!-- ========================= -->
+                  <!-- /MATCH TIMING             -->
+                  <!-- ========================= -->
                 </div>
 
-                <hr class="my-4">
-
-                <div class="row">
-                  <div class="col-md-6">
-                    <div class="form-check mb-2">
-                      <input class="form-check-input" type="checkbox" id="enable_ap" name="enable_ap" {% if cfg.enable_ap %}checked{% endif %}>
-                      <label class="form-check-label" for="enable_ap">Enable AP Configuration</label>
-                    </div>
-                    <p class="text-muted small mb-0">AP configuration can be enabled without switch configuration.</p>
-                  </div>
-                  <div class="col-md-6">
-                    <div class="form-check mb-2">
-                      <input class="form-check-input" type="checkbox" id="enable_switch" name="enable_switch" {% if cfg.enable_switch %}checked{% endif %}>
-                      <label class="form-check-label" for="enable_switch">Enable Switch Configuration</label>
-                    </div>
-                    <p class="text-muted small mb-0">Switch setup is optional but depends on AP enablement.</p>
-                  </div>
-                  <div class="d-grid mt-3">
+                <!-- Button pinned to bottom of the card -->
+                <div class="d-grid mt-3">
                   <button type="submit" class="btn btn-primary btn-sm">Save Settings</button>
-                </div>
                 </div>
               </div>
             </div>
@@ -183,7 +243,7 @@
   <footer class="text-center py-3">
     <div class="container">
       <span class="text-muted">
-        © <a href="https://github.com/justfishin1999">github.com/justfishin1999</a> - 2025 - Freezy Arena Ultralite - v2025.0.5
+        © <a href="https://github.com/justfishin1999">github.com/justfishin1999</a> - 2026 - Freezy Arena Ultralite - v2026.0.1
       </span>
     </div>
   </footer>

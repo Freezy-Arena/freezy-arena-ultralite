@@ -16,7 +16,7 @@ from flask import Flask, Response, make_response, render_template, request, json
 cli = sys.modules['flask.cli']
 cli.show_server_banner = lambda *x: None
 
-app = Flask(__name__)
+app = Flask(__name__, static_folder="static", static_url_path="/static")
 
 CONFIG_FILE = "config.json"
 MATCH_SCHEDULE_FILE = "match_schedule.json"
@@ -30,6 +30,10 @@ default_config = {
     "enable_ap": True,
     "enable_switch": True,
     "event_name": "Super Cool Event",
+    "match_auto_seconds": 15,
+    "match_teleop_seconds": 105,
+    "match_endgame_seconds": 30,
+    "match_transition_pause_seconds": 2,
 }
 
 def load_config():
@@ -120,6 +124,11 @@ timer_duration = 0
 timer_start_time = None
 timer_running = False
 buzzer_triggered = False
+timer_end_seq = 0
+timer_end_reason = None
+timer_match_pause_enabled = False
+timer_match_auto_seconds = 0
+timer_match_pause_seconds = 0
 
 logs = []
 
@@ -147,6 +156,20 @@ def save_config_route():
     enable_ap = request.form.get('enable_ap') == 'on'
     enable_switch = request.form.get('enable_switch') == 'on'
     event_name = request.form.get('event_name', '').strip()
+
+    # NEW: match timing fields (seconds)
+    def read_int_field(name, fallback):
+        raw = request.form.get(name, "").strip()
+        if raw == "":
+            return int(runtime_config.get(name, fallback))
+        try:
+            return max(0, int(raw))
+        except Exception:
+            return int(runtime_config.get(name, fallback))
+
+    runtime_config["match_auto_seconds"] = read_int_field("match_auto_seconds", 15)
+    runtime_config["match_teleop_seconds"] = read_int_field("match_teleop_seconds", 105)
+    runtime_config["match_endgame_seconds"] = read_int_field("match_endgame_seconds", 30)
 
     # update in-memory
     runtime_config['ap_ip'] = ap_ip or runtime_config['ap_ip']
@@ -388,41 +411,93 @@ def clear_switch():
 @app.route('/start_timer', methods=['POST'])
 def start_timer():
     global timer_start_time, timer_duration, timer_running, buzzer_triggered
-    try:
-        seconds = int(request.form.get('seconds', '0'))
-    except ValueError:
-        return jsonify({"status": "error", "message": "Invalid seconds"}), 400
+    global timer_end_seq, timer_end_reason
+    global timer_match_pause_enabled, timer_match_auto_seconds, timer_match_pause_seconds
 
+    seconds = int(request.form.get('seconds', '0') or 0)
     if seconds <= 0:
-        return jsonify({"status": "error", "message": "Seconds must be > 0"}), 400
+        return jsonify({"status": "error", "message": "Invalid timer duration"}), 400
+
+    # Detect "full match" starts and enable auto->teleop pause
+    try:
+        timing = get_match_timing()  # must return {"auto","teleop","endgame","total"}
+        pause_s = int(runtime_config.get("match_transition_pause_seconds", 2) or 0)
+    except Exception:
+        timing = None
+        pause_s = 0
+
+    if timing and seconds == int(timing.get("total", 0)) and pause_s > 0 and int(timing.get("auto", 0)) > 0:
+        timer_match_pause_enabled = True
+        timer_match_auto_seconds = int(timing["auto"])
+        timer_match_pause_seconds = pause_s
+    else:
+        timer_match_pause_enabled = False
+        timer_match_auto_seconds = 0
+        timer_match_pause_seconds = 0
 
     timer_duration = seconds
     timer_start_time = time.time()
     timer_running = True
     buzzer_triggered = False
-    log(f"{seconds} second timer started.")
-    return jsonify({"status": "started"})
+    timer_end_reason = None
+
+    log(f"Timer started for {seconds} seconds.")
+    return jsonify({"status": "started", "seconds": seconds})
 
 @app.route('/stop_timer', methods=['POST'])
 def stop_timer():
     global timer_running, timer_start_time, timer_duration, buzzer_triggered
+    global timer_end_seq, timer_end_reason
+    global timer_match_pause_enabled, timer_match_auto_seconds, timer_match_pause_seconds
+
     timer_running = False
     timer_start_time = None
     timer_duration = 0
     buzzer_triggered = False
+
+    timer_match_pause_enabled = False
+    timer_match_auto_seconds = 0
+    timer_match_pause_seconds = 0
+
+    timer_end_seq += 1
+    timer_end_reason = "stopped"
+
     log("Timer stopped.")
     return jsonify({"status": "stopped"})
 
+
 def get_timer_state():
     global timer_start_time, timer_running, timer_duration
+    global timer_end_seq, timer_end_reason
+    global timer_match_pause_enabled, timer_match_auto_seconds, timer_match_pause_seconds
+
     if timer_running and timer_start_time:
-        elapsed = time.time() - timer_start_time
-        remaining = timer_duration - elapsed
+        real_elapsed = time.time() - timer_start_time
+
+        # Apply auto->teleop pause: freeze effective elapsed for pause window after auto ends
+        effective_elapsed = real_elapsed
+        if timer_match_pause_enabled and timer_match_auto_seconds > 0 and timer_match_pause_seconds > 0:
+            # pause_applied grows from 0..pause_seconds during the window (auto..auto+pause)
+            pause_applied = max(0.0, min(float(timer_match_pause_seconds), real_elapsed - float(timer_match_auto_seconds)))
+            effective_elapsed = real_elapsed - pause_applied
+
+        remaining = timer_duration - effective_elapsed
+
         if remaining <= 0:
             timer_running = False
             timer_start_time = None
             remaining = 0
+
+            timer_end_seq += 1
+            timer_end_reason = "completed"
+
+            # clear match pause state when completed
+            timer_match_pause_enabled = False
+            timer_match_auto_seconds = 0
+            timer_match_pause_seconds = 0
+
         return remaining, timer_running
+
     return timer_duration, False
 
 
@@ -589,50 +664,51 @@ def fetch_ap_status(ap_ip: str):
 def unified_stream():
     def event_stream():
         global buzzer_triggered
+        global timer_end_seq, timer_end_reason
 
-        # let browsers know the stream is alive
         yield ": ok\n\n"
-
-        # we’ll keep track of the last log length so we only send new ones
         last_log_len = len(logs)
 
+        # local state for buzzer edge detection
+        last_sent_end_seq = timer_end_seq
+
         while True:
-            # 1) timer
             remaining, running = get_timer_state()
+
+            # buzzer = TRUE exactly once when a run completes naturally
             trigger_buzzer = False
-            if running and remaining <= 0 and not buzzer_triggered:
-                trigger_buzzer = True
-                buzzer_triggered = True
+            if timer_end_seq != last_sent_end_seq:
+                if timer_end_reason == "completed":
+                    trigger_buzzer = True
+                last_sent_end_seq = timer_end_seq
 
             timer_payload = json.dumps({
                 "remaining": remaining,
                 "running": running,
                 "buzzer": trigger_buzzer,
-                "event_name": runtime_config.get("event_name",""),
+                "end_seq": timer_end_seq,
+                "end_reason": timer_end_reason,
+                "event_name": runtime_config.get("event_name", ""),
                 "teams": audience_display_teams,
-
             })
             yield f"event: timer\ndata: {timer_payload}\n\n"
 
-            # 2) logs (only if new)
+            # logs (only if new)
             current_len = len(logs)
             if current_len != last_log_len:
-                # send only the last ~100 to avoid giant payloads
                 recent_logs = logs[-100:]
                 logs_payload = json.dumps(recent_logs)
                 yield f"event: logs\ndata: {logs_payload}\n\n"
                 last_log_len = current_len
 
-            # 3) AP status (only if AP is enabled)
+            # AP status
             if runtime_config.get("enable_ap", True):
                 ap_ip = runtime_config.get("ap_ip", "").strip()
                 ap_data = fetch_ap_status(ap_ip)
-                # include apEnabled so frontend can show N/A if disabled
                 ap_data["apEnabled"] = True
                 ap_payload = json.dumps(ap_data)
                 yield f"event: apstatus\ndata: {ap_payload}\n\n"
             else:
-                # tell frontend AP is disabled
                 ap_payload = json.dumps({"apEnabled": False})
                 yield f"event: apstatus\ndata: {ap_payload}\n\n"
 
@@ -656,18 +732,22 @@ def schedule_audience_page():
 @app.route('/schedule/data')
 def schedule_data():
     global match_schedule
+
+    timing = get_match_timing()
+
     if not match_schedule.get("matches") and not match_schedule.get("meta", {}).get("teams"):
-        # no schedule yet, but maybe we have teams
         stored_teams = load_team_list()
         if stored_teams:
-            # give frontend something to prefill
             return jsonify({
                 "matches": [],
-                "meta": {
-                    "teams": stored_teams
-                }
+                "meta": {"teams": stored_teams},
+                "timing": timing,
             })
-    return jsonify(match_schedule)
+
+    # attach timing to normal response too
+    out = dict(match_schedule)
+    out["timing"] = timing
+    return jsonify(out)
 
 @app.route('/schedule/generate', methods=['POST'])
 def schedule_generate():
@@ -787,24 +867,59 @@ def schedule_print():
 def schedule_mark_done():
     global match_schedule
     data = request.get_json(force=True)
-    match_id = data.get("match_id")
+
+    raw_match_id = data.get("match_id", None)
     done = bool(data.get("done", True))
 
-    if not match_id:
+    if raw_match_id is None or raw_match_id == "":
         return jsonify({"status": "error", "message": "match_id required"}), 400
+
+    # Normalize match_id to int when possible
+    try:
+        match_id = int(raw_match_id)
+    except Exception:
+        match_id = raw_match_id  # fallback, but we’ll also string-compare
 
     updated = False
     for m in match_schedule.get("matches", []):
-        if m.get("match_id") == match_id:
-            m["done"] = done
-            updated = True
-            break
+        mid = m.get("match_id")
+
+        # compare robustly
+        try:
+            if int(mid) == match_id:
+                m["done"] = done
+                updated = True
+                break
+        except Exception:
+            if str(mid) == str(match_id):
+                m["done"] = done
+                updated = True
+                break
 
     if updated:
         save_match_schedule(match_schedule)
         return jsonify({"status": "ok"})
     else:
         return jsonify({"status": "error", "message": "match not found"}), 404
+
+def get_match_timing():
+    def _safe_int(v, fallback):
+        try:
+            return max(0, int(v))
+        except Exception:
+            return fallback
+
+    auto_s = _safe_int(runtime_config.get("match_auto_seconds", 15), 15)
+    tele_s = _safe_int(runtime_config.get("match_teleop_seconds", 105), 105)
+    end_s  = _safe_int(runtime_config.get("match_endgame_seconds", 30), 30)
+    total  = auto_s + tele_s + end_s
+
+    return {
+        "auto": auto_s,
+        "teleop": tele_s,
+        "endgame": end_s,
+        "total": total,
+    }
 
     
 if __name__ == '__main__':
